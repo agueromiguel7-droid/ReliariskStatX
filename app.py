@@ -9,10 +9,8 @@ import os
 # ==========================================
 # CONFIGURACIÓN Y ESTILOS
 # ==========================================
-# REQ 1: Cambiar Nombre a "Reliarisk StatX"
 st.set_page_config(page_title="Reliarisk StatX", layout="wide")
 
-# Estilo personalizado para tablas y métricas
 st.markdown("""
 <style>
     .reportview-container { margin-top: -2em; }
@@ -24,24 +22,32 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
+# FUNCIONES DE AYUDA (CALLBACKS)
+# ==========================================
+# Esta función se ejecuta ANTES de recargar la app cuando se pulsa Reiniciar
+def clear_input_callback():
+    st.session_state.data_input = ""
+
+# ==========================================
 # LOGO Y TÍTULO
 # ==========================================
 if os.path.exists("mi_logo.png"):
     st.sidebar.image("mi_logo.png", width=200, caption="Grupo Reliarisk")
 
-# REQ 1: Cambiar Título Principal
 st.title("Reliarisk StatX")
-st.markdown("**Plataforma de Caracterización Estadística Avanzada** | *Versión 2.1*")
+st.markdown("**Plataforma de Caracterización Estadística Avanzada** | *Versión 2.2*")
 st.markdown("---")
 
 # ==========================================
-# 1. INGESTA DE DATOS (REQ 2 y 3)
+# 1. INGESTA DE DATOS
 # ==========================================
 st.sidebar.header("1. Configuración de Datos")
 
-# REQ 2: Ventana para pegar valores
 st.sidebar.markdown("### 📋 Carga de Datos")
 st.sidebar.caption("Pegue los valores de su variable (uno por línea o separados por comas/espacios).")
+
+# Widget de entrada de texto
+# Nota: 'key="data_input"' vincula este cuadro al session_state
 raw_text_input = st.sidebar.text_area("Valores de la Variable:", height=200, key="data_input")
 
 # Opciones adicionales
@@ -53,9 +59,7 @@ def process_text_data(text_data):
     if not text_data.strip():
         return None
     try:
-        # Reemplazar comas y saltos de línea por espacios y dividir
         cleaned_text = text_data.replace(',', ' ').replace('\n', ' ')
-        # Convertir a floats y eliminar no-numéricos
         values = [float(x) for x in cleaned_text.split() if x.strip()]
         if not values:
             return None
@@ -64,42 +68,37 @@ def process_text_data(text_data):
         st.sidebar.error("Error: Asegúrese de pegar solo valores numéricos válidos.")
         return None
 
-# REQ 3: Botones de Control
+# Botones de Control
 col_btn1, col_btn2 = st.sidebar.columns(2)
 
 with col_btn1:
-    # Botón para iniciar análisis
     start_analysis = st.button("▶ Iniciar Análisis", use_container_width=True, type="primary")
 
 with col_btn2:
-    # Botón para reiniciar (limpia el estado)
-    if st.button("🔄 Reiniciar Cálculo", use_container_width=True):
-        st.session_state.data_input = "" # Limpia el área de texto
-        st.rerun() # Recarga la app (usando st.rerun() en lugar de experimental_rerun)
+    # CORRECCIÓN: Usamos on_click para limpiar el estado de forma segura
+    st.button("🔄 Reiniciar Cálculo", use_container_width=True, on_click=clear_input_callback)
 
 # Lógica Principal
 df = None
+# Si se presiona iniciar y hay texto, o si ya se inició previamente (persistencia simple)
 if start_analysis and raw_text_input:
     df = process_text_data(raw_text_input)
 elif raw_text_input and not start_analysis:
-    # Si hay datos pero no se ha presionado iniciar, mostrar mensaje
     st.info("ℹ️ Haga clic en '▶ Iniciar Análisis' en la barra lateral para procesar los datos pegados.")
 
 
 if df is not None and start_analysis:
-    # Definir col_name genérico
     col_name = "Variable Pegada"
     
     # Limpieza de datos
     data = df[df.columns[0]].dropna()
-    data = data[np.isfinite(data)] # Eliminar inf
-    data = data[data > 0] if force_loc_zero else data # Si loc=0, solo datos positivos
+    data = data[np.isfinite(data)] 
+    data = data[data > 0] if force_loc_zero else data 
     
     if len(data) < 5:
         st.error("Error: Se necesitan al menos 5 valores válidos para un análisis fiable.")
         st.stop()
 
-    # Verificación de Datos Fuente
     with st.expander(f"🔍 Verificación de Datos (N={len(data)})"):
         st.dataframe(data.to_frame().T, height=150)
 
@@ -107,8 +106,6 @@ if df is not None and start_analysis:
     # 2. MOTOR DE CÁLCULO
     # ==========================================
     
-    # REQ 5: Incluir distribución Beta
-    # Scipy usa 'beta'. A veces es compleja de ajustar sin límites fijos.
     dist_names = ['norm', 'lognorm', 'weibull_min', 'expon', 'gamma', 'uniform', 'beta']
     results = []
 
@@ -120,26 +117,18 @@ if df is not None and start_analysis:
         
         try:
             # Lógica de Ajuste (Fit)
-            # Beta necesita límites conocidos (floc, fscale) para ser estable. 
-            # Aquí la dejamos libre como intento inicial.
-            if force_loc_zero and name in ['weibull_min', 'gamma', 'lognorm', 'expon']:
-                params = dist.fit(data, floc=0)
+            if force_loc_zero and name in ['weibull_min', 'gamma', 'lognorm', 'expon', 'beta']:
+                 params = dist.fit(data, floc=0)
             else:
-                # Para Beta, si force_loc_zero es True, podemos fijar el inicio en 0
-                if force_loc_zero and name == 'beta':
-                     params = dist.fit(data, floc=0)
-                else:
-                    params = dist.fit(data)
+                 params = dist.fit(data)
                 
-            # Formateo de parámetros (REQ 4)
+            # Formateo de parámetros
             param_str = ""
             if name == 'norm':
                 param_str = f"Media={params[0]:.2f}, Desv={params[1]:.2f}"
             elif name == 'weibull_min':
                 param_str = f"Forma={params[0]:.2f}, Escala={params[2]:.2f}, Loc={params[1]:.2f}"
-            # REQ 4: Cambio de nombres para Lognormal
             elif name == 'lognorm':
-                # s = sigma (DSt), scale = exp(mu) (Mediana), loc
                 s, loc, scale = params
                 median_val = scale
                 mu_log = np.log(scale)
@@ -148,9 +137,7 @@ if df is not None and start_analysis:
                 param_str = f"Loc={params[0]:.2f}, Escala={params[1]:.2f}"
             elif name == 'gamma':
                 param_str = f"Alpha={params[0]:.2f}, Beta={params[2]:.2f}, Loc={params[1]:.2f}"
-            # Parametros Beta
             elif name == 'beta':
-                # a, b, loc, scale
                 param_str = f"Alpha={params[0]:.2f}, Beta={params[1]:.2f}, Min={params[2]:.2f}, Max={params[2]+params[3]:.2f}"
             else:
                 param_str = ", ".join([f"{p:.2f}" for p in params])
@@ -158,13 +145,11 @@ if df is not None and start_analysis:
             # Cálculo Anderson-Darling (A2)
             n = len(data)
             sorted_data = np.sort(data)
-            # Asegurar que CDF no de 0 o 1 exacto
             cdf_vals = np.clip(dist.cdf(sorted_data, *params), 1e-10, 1 - 1e-10)
             
             s_val = np.sum((2*np.arange(1, n+1) - 1) * (np.log(cdf_vals) + np.log(1 - cdf_vals[::-1])))
             ad_stat = -n - s_val/n
             
-            # Cálculo KS para P-Value proxy
             ks_stat, ks_p = stats.kstest(data, name, args=params)
 
             results.append({
@@ -176,14 +161,12 @@ if df is not None and start_analysis:
                 "Params": params
             })
         except Exception as e:
-            # print(f"Error en {name}: {e}") # Depuración
             pass
         
         my_bar.progress((i + 1) / len(dist_names))
 
     my_bar.empty()
     
-    # Crear DataFrame
     results_df = pd.DataFrame(results)
     if not results_df.empty:
         results_df = results_df.sort_values(by="Estadístico AD", ascending=True).reset_index(drop=True)
@@ -213,7 +196,6 @@ if df is not None and start_analysis:
             sel_dist = selected_row["Object"]
             sel_params = selected_row["Params"]
 
-            # Calculadora de Percentiles
             st.markdown("---")
             st.markdown("### 🧮 Calculadora de Probabilidad")
             
@@ -240,7 +222,6 @@ if df is not None and start_analysis:
             
             fig, ax = plt.subplots(figsize=(10, 6))
             
-            # Rango de ploteo: un poco más allá de los datos para ver las colas
             x_min, x_max = min(data), max(data)
             pad = (x_max - x_min) * 0.1
             x_plot = np.linspace(max(0, x_min - pad) if force_loc_zero else x_min - pad, x_max + pad, 1000)
@@ -282,6 +263,5 @@ if df is not None and start_analysis:
          st.warning("No se pudo ajustar ninguna distribución a los datos proporcionados.")
 
 else:
-    # Estado inicial o después de reiniciar
     if not raw_text_input:
          st.info("👋 Por favor, pegue sus datos en la barra lateral para comenzar.")
