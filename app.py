@@ -22,11 +22,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# FUNCIONES DE AYUDA (CALLBACKS)
+# GESTIÓN DE ESTADO (SESSION STATE) - SOLUCIÓN AL PROBLEMA
 # ==========================================
-# Esta función se ejecuta ANTES de recargar la app cuando se pulsa Reiniciar
-def clear_input_callback():
+# Inicializamos una variable para "recordar" si el análisis ya se hizo.
+if 'analysis_done' not in st.session_state:
+    st.session_state['analysis_done'] = False
+
+# Callback para el botón RENICIAR: Limpia datos y "olvida" que se hizo el análisis
+def reset_callback():
     st.session_state.data_input = ""
+    st.session_state.analysis_done = False
 
 # ==========================================
 # LOGO Y TÍTULO
@@ -35,7 +40,7 @@ if os.path.exists("mi_logo.png"):
     st.sidebar.image("mi_logo.png", width=200, caption="Grupo Reliarisk")
 
 st.title("Reliarisk StatX")
-st.markdown("**Plataforma de Caracterización Estadística Avanzada** | *Versión 2.2*")
+st.markdown("**Plataforma de Caracterización Estadística Avanzada** | *Versión 2.3 (Stable)*")
 st.markdown("---")
 
 # ==========================================
@@ -46,8 +51,7 @@ st.sidebar.header("1. Configuración de Datos")
 st.sidebar.markdown("### 📋 Carga de Datos")
 st.sidebar.caption("Pegue los valores de su variable (uno por línea o separados por comas/espacios).")
 
-# Widget de entrada de texto
-# Nota: 'key="data_input"' vincula este cuadro al session_state
+# Widget de entrada de texto vinculado al session state
 raw_text_input = st.sidebar.text_area("Valores de la Variable:", height=200, key="data_input")
 
 # Opciones adicionales
@@ -56,7 +60,7 @@ force_loc_zero = st.sidebar.checkbox("Forzar origen en cero (Loc=0)", value=True
 
 # Función para procesar el texto pegado
 def process_text_data(text_data):
-    if not text_data.strip():
+    if not text_data or not text_data.strip():
         return None
     try:
         cleaned_text = text_data.replace(',', ' ').replace('\n', ' ')
@@ -72,22 +76,25 @@ def process_text_data(text_data):
 col_btn1, col_btn2 = st.sidebar.columns(2)
 
 with col_btn1:
-    start_analysis = st.button("▶ Iniciar Análisis", use_container_width=True, type="primary")
+    # Si se presiona Iniciar, marcamos el estado como True
+    if st.button("▶ Iniciar Análisis", use_container_width=True, type="primary"):
+        st.session_state.analysis_done = True
 
 with col_btn2:
-    # CORRECCIÓN: Usamos on_click para limpiar el estado de forma segura
-    st.button("🔄 Reiniciar Cálculo", use_container_width=True, on_click=clear_input_callback)
+    # Usamos el callback corregido para reiniciar
+    st.button("🔄 Reiniciar Cálculo", use_container_width=True, on_click=reset_callback)
 
-# Lógica Principal
+
+# ==========================================
+# LÓGICA PRINCIPAL CORREGIDA
+# ==========================================
 df = None
-# Si se presiona iniciar y hay texto, o si ya se inició previamente (persistencia simple)
-if start_analysis and raw_text_input:
+# La condición ahora depende de que haya texto Y que la "memoria" diga que el análisis está activo.
+if raw_text_input and st.session_state.analysis_done:
     df = process_text_data(raw_text_input)
-elif raw_text_input and not start_analysis:
-    st.info("ℹ️ Haga clic en '▶ Iniciar Análisis' en la barra lateral para procesar los datos pegados.")
 
-
-if df is not None and start_analysis:
+# Si tenemos datos válidos procesados, procedemos con el análisis
+if df is not None:
     col_name = "Variable Pegada"
     
     # Limpieza de datos
@@ -97,6 +104,8 @@ if df is not None and start_analysis:
     
     if len(data) < 5:
         st.error("Error: Se necesitan al menos 5 valores válidos para un análisis fiable.")
+        # Si falla, reseteamos el estado para evitar bucles
+        st.session_state.analysis_done = False
         st.stop()
 
     with st.expander(f"🔍 Verificación de Datos (N={len(data)})"):
@@ -109,64 +118,62 @@ if df is not None and start_analysis:
     dist_names = ['norm', 'lognorm', 'weibull_min', 'expon', 'gamma', 'uniform', 'beta']
     results = []
 
-    progress_text = "Ajustando distribuciones..."
-    my_bar = st.progress(0, text=progress_text)
+    # Usamos un spinner en lugar de barra de progreso para evitar problemas de UI en reruns
+    with st.spinner("Ajustando distribuciones... por favor espere."):
+        for i, name in enumerate(dist_names):
+            dist = getattr(stats, name)
+            
+            try:
+                # Lógica de Ajuste (Fit)
+                if force_loc_zero and name in ['weibull_min', 'gamma', 'lognorm', 'expon', 'beta']:
+                     # Para Beta, si forzamos loc=0, fijamos el límite inferior.
+                     # Scipy beta fit es delicado, esto es un intento best-effort.
+                     params = dist.fit(data, floc=0)
+                else:
+                     params = dist.fit(data)
+                    
+                # Formateo de parámetros
+                param_str = ""
+                if name == 'norm':
+                    param_str = f"Media={params[0]:.2f}, Desv={params[1]:.2f}"
+                elif name == 'weibull_min':
+                    param_str = f"Forma={params[0]:.2f}, Escala={params[2]:.2f}, Loc={params[1]:.2f}"
+                elif name == 'lognorm':
+                    s, loc, scale = params
+                    median_val = scale
+                    mu_log = np.log(scale)
+                    param_str = f"DSt={s:.3f}, Mediana={median_val:.3f} (Mediat={mu_log:.3f})"
+                elif name == 'expon':
+                    param_str = f"Loc={params[0]:.2f}, Escala={params[1]:.2f}"
+                elif name == 'gamma':
+                    param_str = f"Alpha={params[0]:.2f}, Beta={params[2]:.2f}, Loc={params[1]:.2f}"
+                elif name == 'beta':
+                    # params output: a (alpha), b (beta), loc (min), scale (rango = max-min)
+                    param_str = f"Alpha={params[0]:.2f}, Beta={params[1]:.2f}, Min={params[2]:.2f}, Max={params[2]+params[3]:.2f}"
+                else:
+                    param_str = ", ".join([f"{p:.2f}" for p in params])
 
-    for i, name in enumerate(dist_names):
-        dist = getattr(stats, name)
-        
-        try:
-            # Lógica de Ajuste (Fit)
-            if force_loc_zero and name in ['weibull_min', 'gamma', 'lognorm', 'expon', 'beta']:
-                 params = dist.fit(data, floc=0)
-            else:
-                 params = dist.fit(data)
+                # Cálculo Anderson-Darling (A2)
+                n = len(data)
+                sorted_data = np.sort(data)
+                cdf_vals = np.clip(dist.cdf(sorted_data, *params), 1e-10, 1 - 1e-10)
                 
-            # Formateo de parámetros
-            param_str = ""
-            if name == 'norm':
-                param_str = f"Media={params[0]:.2f}, Desv={params[1]:.2f}"
-            elif name == 'weibull_min':
-                param_str = f"Forma={params[0]:.2f}, Escala={params[2]:.2f}, Loc={params[1]:.2f}"
-            elif name == 'lognorm':
-                s, loc, scale = params
-                median_val = scale
-                mu_log = np.log(scale)
-                param_str = f"DSt={s:.3f}, Mediana={median_val:.3f} (Mediat={mu_log:.3f})"
-            elif name == 'expon':
-                param_str = f"Loc={params[0]:.2f}, Escala={params[1]:.2f}"
-            elif name == 'gamma':
-                param_str = f"Alpha={params[0]:.2f}, Beta={params[2]:.2f}, Loc={params[1]:.2f}"
-            elif name == 'beta':
-                param_str = f"Alpha={params[0]:.2f}, Beta={params[1]:.2f}, Min={params[2]:.2f}, Max={params[2]+params[3]:.2f}"
-            else:
-                param_str = ", ".join([f"{p:.2f}" for p in params])
+                s_val = np.sum((2*np.arange(1, n+1) - 1) * (np.log(cdf_vals) + np.log(1 - cdf_vals[::-1])))
+                ad_stat = -n - s_val/n
+                
+                ks_stat, ks_p = stats.kstest(data, name, args=params)
 
-            # Cálculo Anderson-Darling (A2)
-            n = len(data)
-            sorted_data = np.sort(data)
-            cdf_vals = np.clip(dist.cdf(sorted_data, *params), 1e-10, 1 - 1e-10)
-            
-            s_val = np.sum((2*np.arange(1, n+1) - 1) * (np.log(cdf_vals) + np.log(1 - cdf_vals[::-1])))
-            ad_stat = -n - s_val/n
-            
-            ks_stat, ks_p = stats.kstest(data, name, args=params)
-
-            results.append({
-                "Distribución": name.capitalize(),
-                "Estadístico AD": ad_stat,
-                "Valor P (KS)": ks_p,
-                "Parámetros Detectados": param_str,
-                "Object": dist,
-                "Params": params
-            })
-        except Exception as e:
-            pass
+                results.append({
+                    "Distribución": name.capitalize(),
+                    "Estadístico AD": ad_stat,
+                    "Valor P (KS)": ks_p,
+                    "Parámetros Detectados": param_str,
+                    "Object": dist,
+                    "Params": params
+                })
+            except Exception as e:
+                pass
         
-        my_bar.progress((i + 1) / len(dist_names))
-
-    my_bar.empty()
-    
     results_df = pd.DataFrame(results)
     if not results_df.empty:
         results_df = results_df.sort_values(by="Estadístico AD", ascending=True).reset_index(drop=True)
@@ -187,9 +194,13 @@ if df is not None and start_analysis:
             st.info("💡 Nota: Un 'Estadístico AD' más bajo indica un mejor ajuste.")
 
             st.markdown("### 🛠️ Análisis Detallado")
+            
+            # Selector de distribución (Esto es lo que causaba el reinicio antes)
+            dist_options = results_df["Distribución"].tolist()
             selected_dist_name = st.selectbox(
                 "Seleccione la distribución a visualizar:", 
-                results_df["Distribución"].tolist()
+                dist_options,
+                index=0 # Siempre inicia con la mejor
             )
             
             selected_row = results_df[results_df["Distribución"] == selected_dist_name].iloc[0]
@@ -202,42 +213,47 @@ if df is not None and start_analysis:
             calc_tab1, calc_tab2 = st.tabs(["Valor ⮕ Percentil", "Percentil ⮕ Valor"])
             
             with calc_tab1:
-                val_input = st.number_input(f"Ingresar valor:", value=float(np.mean(data)))
+                # Usamos una key única para evitar conflictos de estado en los inputs numéricos
+                val_input = st.number_input(f"Ingresar valor:", value=float(np.mean(data)), key="val_to_perc")
                 perc_result = sel_dist.cdf(val_input, *sel_params) * 100
                 st.metric("Percentil (Prob. Acumulada)", f"{perc_result:.2f}%")
                 
             with calc_tab2:
-                perc_input = st.number_input("Ingresar Percentil (0-100%):", value=50.0, min_value=0.01, max_value=99.99)
+                perc_input = st.number_input("Ingresar Percentil (0-100%):", value=50.0, min_value=0.01, max_value=99.99, key="perc_to_val")
                 val_result = sel_dist.ppf(perc_input/100, *sel_params)
                 st.metric(f"Valor estimado para P{perc_input:.0f}", f"{val_result:.4f}")
 
         with col_master_2:
             st.subheader(f"Visualización: {selected_dist_name}")
             
+            # Radio button (Esto también causaba reinicio)
             plot_type = st.radio(
                 "Tipo de Gráfico:",
                 ["Densidad (PDF)", "Acumulada (CDF)", "Acumulada Inversa (1-CDF)"],
-                horizontal=True
+                horizontal=True,
+                key="plot_type_radio"
             )
             
             fig, ax = plt.subplots(figsize=(10, 6))
             
             x_min, x_max = min(data), max(data)
             pad = (x_max - x_min) * 0.1
-            x_plot = np.linspace(max(0, x_min - pad) if force_loc_zero else x_min - pad, x_max + pad, 1000)
+            # Asegurar rango positivo si force_loc_zero
+            start_plot = max(0, x_min - pad) if force_loc_zero else x_min - pad
+            x_plot = np.linspace(start_plot, x_max + pad, 1000)
             
             if plot_type == "Densidad (PDF)":
                 sns.histplot(data, stat="density", bins='auto', color="#87CEEB", alpha=0.5, label="Datos Reales", ax=ax)
                 y_plot = sel_dist.pdf(x_plot, *sel_params)
                 ax.plot(x_plot, y_plot, 'r-', lw=2.5, label=f"Ajuste {selected_dist_name}")
-                ax.set_title("Función de Densidad de Probabilidad")
+                ax.set_title(f"Función de Densidad (PDF) - {selected_dist_name}")
                 ax.set_ylabel("Densidad")
                 
             elif plot_type == "Acumulada (CDF)":
                 sns.histplot(data, stat="density", bins='auto', cumulative=True, element="step", fill=False, color="gray", label="Datos Empíricos", ax=ax)
                 y_plot = sel_dist.cdf(x_plot, *sel_params)
                 ax.plot(x_plot, y_plot, 'g-', lw=2.5, label=f"CDF {selected_dist_name}")
-                ax.set_title("Función de Distribución Acumulada")
+                ax.set_title(f"Distribución Acumulada (CDF) - {selected_dist_name}")
                 ax.set_ylabel("Probabilidad Acumulada")
                 
             elif plot_type == "Acumulada Inversa (1-CDF)":
@@ -247,7 +263,7 @@ if df is not None and start_analysis:
                 
                 y_plot = sel_dist.sf(x_plot, *sel_params) 
                 ax.plot(x_plot, y_plot, 'purple', lw=2.5, label=f"1-CDF {selected_dist_name}")
-                ax.set_title("Función de Supervivencia")
+                ax.set_title(f"Supervivencia (1-CDF) - {selected_dist_name}")
                 ax.set_ylabel("Probabilidad (1 - P)")
 
             ax.legend()
@@ -260,8 +276,11 @@ if df is not None and start_analysis:
                 ax2.plot([min(data), max(data)], [min(data), max(data)], 'r--', lw=2)
                 st.pyplot(fig2)
     else:
-         st.warning("No se pudo ajustar ninguna distribución a los datos proporcionados.")
+         st.warning("No se pudo ajustar ninguna distribución a los datos proporcionados. Verifique que los datos sean suficientes y apropiados para estas distribuciones.")
 
 else:
+    # Estado inicial o después de reiniciar
     if not raw_text_input:
-         st.info("👋 Por favor, pegue sus datos en la barra lateral para comenzar.")
+         st.info("👋 Bienvenido a Reliarisk StatX. Por favor, pegue sus datos en la barra lateral para comenzar.")
+    elif raw_text_input and not st.session_state.analysis_done:
+         st.info("ℹ️ Datos detectados. Haga clic en '▶ Iniciar Análisis' en la barra lateral para procesarlos.")
